@@ -246,10 +246,10 @@ public class ProductBatchValidator
         errorMessages.add(
             format(PRODUCT_VARIANT_DRAFT_KEY_NOT_SET, variantPosition, productDraftKey));
       }
-      if (isBlank(productVariantDraft.getSku())) {
+      /*if (isBlank(productVariantDraft.getSku())) {
         errorMessages.add(
             format(PRODUCT_VARIANT_DRAFT_SKU_NOT_SET, variantPosition, productDraftKey));
-      }
+      }*/
     } else {
       errorMessages.add(format(PRODUCT_VARIANT_DRAFT_IS_NULL, variantPosition, productDraftKey));
     }
