@@ -23,8 +23,10 @@ import com.commercetools.api.models.product.Product;
 import com.commercetools.api.models.product.ProductDraft;
 import com.commercetools.api.models.product.ProductProjection;
 import com.commercetools.api.models.product.ProductRemoveVariantAction;
+import com.commercetools.api.models.product.ProductSetAttributeActionBuilder;
 import com.commercetools.api.models.product.ProductSetSkuAction;
 import com.commercetools.api.models.product.ProductUpdateAction;
+import com.commercetools.api.models.product.ProductVariantDraft;
 import com.commercetools.sync.products.ActionGroup;
 import com.commercetools.sync.products.AttributeMetaData;
 import com.commercetools.sync.products.ProductSyncOptions;
@@ -124,6 +126,11 @@ public final class ProductSyncUtils {
 
     updateActions.addAll(
         buildVariantsUpdateActions(oldProduct, newProduct, syncOptions, attributesMetaData));
+
+    updateActions.addAll(
+            buildProductLevelAttributeActions(oldProduct, newProduct)
+    );
+
 
     // lastly publish/unpublish product
     final boolean hasNewUpdateActions = updateActions.size() > 0;
@@ -231,6 +238,31 @@ public final class ProductSyncUtils {
     updateActions.addAll(buildRemoveFromCategoryUpdateActions(oldProduct, newProduct));
     return updateActions;
   }
+
+  private static List<ProductUpdateAction> buildProductLevelAttributeActions(
+          ProductProjection oldProduct,
+          ProductDraft newProduct) {
+
+    List<ProductUpdateAction> actions = new ArrayList<>();
+
+    ProductVariantDraft newMasterVariant = newProduct.getMasterVariant();
+    if (newMasterVariant == null || newMasterVariant.getAttributes() == null) {
+      return actions;
+    }
+
+    newMasterVariant.getAttributes().forEach(attr -> {
+      actions.add(
+              ProductSetAttributeActionBuilder.of()
+                      .name(attr.getName())
+                      .value(attr.getValue())
+                      .staged(false)
+                      .build()
+      );
+    });
+
+    return actions;
+  }
+
 
   private ProductSyncUtils() {}
 }

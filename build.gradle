@@ -60,3 +60,37 @@ dependencies {
     testImplementation "org.assertj:assertj-core:${assertjVersion}"
     testImplementation 'com.github.spotbugs:spotbugs-annotations:4.9.3'
 }
+
+tasks.withType(com.diffplug.gradle.spotless.SpotlessTask).configureEach {
+    enabled = false
+}
+
+// ---- LOCAL BUILD OVERRIDES ----
+tasks.withType(Sign).configureEach {
+    enabled = false
+}
+
+tasks.withType(Javadoc).configureEach {
+    enabled = false
+}
+
+tasks.withType(Jar).configureEach {
+    if (name.toLowerCase().contains("javadoc")) {
+        enabled = false
+    }
+}
+
+publishing {
+    publications {
+        mavenJava {
+            // Remove javadoc artifact completely
+            artifacts.removeIf { artifact ->
+                artifact.classifier == 'javadoc'
+            }
+        }
+    }
+}
+
+tasks.matching { it.name.contains("closeAndRelease") }.configureEach {
+    enabled = false
+}

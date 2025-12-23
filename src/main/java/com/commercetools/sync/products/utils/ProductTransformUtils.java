@@ -34,6 +34,8 @@ import javax.annotation.Nullable;
 
 public final class ProductTransformUtils {
 
+  private static final String REFERENCE_KEY_FIELD = "key";
+
   /**
    * Transforms products by resolving the references and map them to ProductDrafts.
    *
@@ -64,6 +66,30 @@ public final class ProductTransformUtils {
         new ProductTransformUtils.ProductTransformServiceImpl(client, referenceIdToKeyCache);
     return productTransformService.toProductDrafts(products);
   }
+
+  private static List<Attribute> mergeAttributesForCreate(
+          @Nullable List<Attribute> variantAttributes,
+          @Nullable List<Attribute> productAttributes) {
+
+    Map<String, Attribute> merged = new LinkedHashMap<>();
+
+    if (variantAttributes != null) {
+      for (Attribute attr : variantAttributes) {
+        merged.put(attr.getName(), attr);
+      }
+    }
+
+    if (productAttributes != null) {
+      for (Attribute attr : productAttributes) {
+        // product-level attributes override if same name
+        merged.put(attr.getName(), attr);
+      }
+    }
+
+    return new ArrayList<>(merged.values());
+  }
+
+
 
   private static class ProductTransformServiceImpl extends BaseTransformServiceImpl {
 
@@ -109,13 +135,76 @@ public final class ProductTransformUtils {
       transformReferencesToRunParallel.add(this.transformPricesChannelReference(products));
       transformReferencesToRunParallel.add(this.transformCustomTypeReference(products));
       transformReferencesToRunParallel.add(this.transformPricesCustomerGroupReference(products));
+      //transformReferencesToRunParallel.add(this.transformProductReference(products));
 
       return CompletableFuture.allOf(
-              transformReferencesToRunParallel.stream().toArray(CompletableFuture[]::new))
-          .thenApply(
-              ignore ->
-                  ProductReferenceResolutionUtils.mapToProductDrafts(
-                      products, this.referenceIdToKeyCache));
+                      transformReferencesToRunParallel.stream().toArray(CompletableFuture[]::new))
+              .thenApply(
+                      ignore -> {
+                        final List<ProductDraft> drafts =
+                                ProductReferenceResolutionUtils.mapToProductDrafts(products, this.referenceIdToKeyCache);
+                        return applyProductLevelAttributes(products, drafts);
+                      });
+
+    }
+
+    /*@Nonnull
+    private CompletableFuture<Void> transformProductReference(
+            @Nonnull final List<ProductProjection> products) {
+
+      final Set<String> productIds =
+              products.stream()
+                      .map(this::getAllReferences)
+                      .flatMap(Collection::stream)
+                      .filter(ref -> ProductReference.PRODUCT.equals(ref.get("typeId").asText()))
+                      .map(ref -> ref.get("id").asText())
+                      .collect(Collectors.toSet());
+
+      return fetchAndFillReferenceIdToKeyCache(productIds, GraphQlQueryResource.PRODUCTS);
+    }*/
+
+    @Nonnull
+    private List<ProductDraft> applyProductLevelAttributes(
+            @Nonnull final List<ProductProjection> projections,
+            @Nonnull final List<ProductDraft> drafts) {
+
+      final Map<String, ProductProjection> projectionByKey =
+              projections.stream()
+                      .filter(Objects::nonNull)
+                      .filter(p -> p.getKey() != null)
+                      .collect(Collectors.toMap(ProductProjection::getKey, p -> p, (a, b) -> a));
+
+      final List<ProductDraft> result = new ArrayList<>(drafts.size());
+
+      for (ProductDraft draft : drafts) {
+        if (draft == null || draft.getKey() == null) {
+          result.add(draft);
+          continue;
+        }
+
+        final ProductProjection projection = projectionByKey.get(draft.getKey());
+        final List<Attribute> projectionProductAttrs =
+                projection != null ? projection.getAttributes() : null;
+
+        // If source projection has no product-level attributes, keep draft as-is.
+        if (projectionProductAttrs == null || projectionProductAttrs.isEmpty()) {
+          result.add(draft);
+          continue;
+        }
+
+        // ✅ Merge (do NOT overwrite). Draft attrs might already contain some attributes.
+        final List<Attribute> merged =
+                mergeAttributesForCreate(draft.getAttributes(), projectionProductAttrs);
+
+        final ProductDraft patched =
+                ProductDraftBuilder.of(draft)
+                        .attributes(merged)
+                        .build();
+
+        result.add(patched);
+      }
+
+      return result;
     }
 
     @Nonnull
@@ -314,11 +403,31 @@ public final class ProductTransformUtils {
           .collect(Collectors.toList());
     }
 
-    @Nonnull
     private List<JsonNode> getAllReferences(@Nonnull final ProductProjection product) {
+      final List<JsonNode> refs = new ArrayList<>();
+
+      // Variant attributes (existing behavior)
       final List<ProductVariant> allVariants = product.getAllVariants();
-      return getAttributeReferences(allVariants);
+      refs.addAll(getAttributeReferences(allVariants));
+
+      // Product-level attributes (NEW)
+      final List<Attribute> productLevelAttrs = product.getAttributes();
+      if (productLevelAttrs != null && !productLevelAttrs.isEmpty()) {
+        refs.addAll(getProductLevelAttributeReferences(productLevelAttrs));
+      }
+
+      return refs;
     }
+
+    @Nonnull
+    private List<JsonNode> getProductLevelAttributeReferences(@Nonnull final List<Attribute> attrs) {
+      return attrs.stream()
+              .map(AttributeUtils::replaceAttributeValueWithJsonAndReturnValue)
+              .map(AttributeUtils::getAttributeReferences)
+              .flatMap(Collection::stream)
+              .collect(Collectors.toList());
+    }
+
 
     @Nonnull
     private List<JsonNode> getAttributeReferences(@Nonnull final List<ProductVariant> variants) {
@@ -333,13 +442,25 @@ public final class ProductTransformUtils {
     }
 
     private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
-      allAttributeReferences.forEach(
-          reference -> {
-            final String id = reference.get(REFERENCE_ID_FIELD).asText();
-            final String key = referenceIdToKeyCache.get(id);
-            ((ObjectNode) reference).put(REFERENCE_ID_FIELD, key);
-          });
+      allAttributeReferences.forEach(reference -> {
+        if (!(reference instanceof ObjectNode) || !reference.hasNonNull(REFERENCE_ID_FIELD)) {
+          return;
+        }
+
+        final ObjectNode refObj = (ObjectNode) reference;
+        final String id = refObj.get(REFERENCE_ID_FIELD).asText();
+
+        final String key = referenceIdToKeyCache.get(id);
+        if (key == null || key.isBlank()) {
+          return; // leave as-is (still id-based)
+        }
+
+        // IMPORTANT: use key-based identifier, not id-with-key
+        refObj.remove(REFERENCE_ID_FIELD);        // remove "id"
+        refObj.put(REFERENCE_KEY_FIELD, key);     // add "key"
+      });
     }
+
 
     /**
      * Given a {@link Set}s of references of product attributes, this method first checks if there

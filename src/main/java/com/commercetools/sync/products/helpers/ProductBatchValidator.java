@@ -16,6 +16,7 @@ import com.commercetools.api.models.product.ProductDraft;
 import com.commercetools.api.models.product.ProductReference;
 import com.commercetools.api.models.product.ProductVariantDraft;
 import com.commercetools.api.models.product_type.ProductTypeReference;
+import com.commercetools.api.models.product_type.ProductTypeResourceIdentifier;
 import com.commercetools.sync.commons.helpers.BaseBatchValidator;
 import com.commercetools.sync.commons.utils.SyncUtils;
 import com.commercetools.sync.customobjects.helpers.CustomObjectCompositeIdentifier;
@@ -28,6 +29,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
@@ -53,6 +55,8 @@ public class ProductBatchValidator
   static final String PRODUCT_VARIANT_DRAFT_KEY_NOT_SET =
       "ProductVariantDraft at position '%d' of "
           + "ProductDraft with key '%s' has no key set. Please make sure all variants have keys.";
+
+  Set<String> allowVariantKeyMissingForProductTypes = Set.of("configurable-option", "configurable-properties", "resource-bundle", "menu_product_indicator");
 
   public ProductBatchValidator(
       @Nonnull final ProductSyncOptions syncOptions,
@@ -226,10 +230,17 @@ public class ProductBatchValidator
       allVariants.addAll(variants);
     }
 
-    for (int i = 0; i < allVariants.size(); i++) {
-      errorMessages.addAll(
-          getVariantDraftErrorsInAllVariants(
-              allVariants.get(i), i, requireNonNull(productDraft.getKey())));
+    String productTypeKey =
+            Optional.ofNullable(productDraft.getProductType())
+                    .map(ProductTypeResourceIdentifier::getKey)
+                    .orElse(null);
+
+    if(!allowVariantKeyMissingForProductTypes.contains(productTypeKey)) {
+      for (int i = 0; i < allVariants.size(); i++) {
+        errorMessages.addAll(
+                getVariantDraftErrorsInAllVariants(
+                        allVariants.get(i), i, requireNonNull(productDraft.getKey())));
+      }
     }
 
     return errorMessages;
