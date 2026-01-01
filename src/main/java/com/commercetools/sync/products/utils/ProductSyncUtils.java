@@ -124,8 +124,8 @@ public final class ProductSyncUtils {
             syncFilter, ActionGroup.CATEGORIES, () -> buildCategoryActions(oldProduct, newProduct));
     updateActions.addAll(productCategoryUpdateActions);
 
-    updateActions.addAll(
-        buildVariantsUpdateActions(oldProduct, newProduct, syncOptions, attributesMetaData));
+    //updateActions.addAll(
+    //    buildVariantsUpdateActions(oldProduct, newProduct, syncOptions, attributesMetaData));
 
     updateActions.addAll(
             buildProductLevelAttributeActions(oldProduct, newProduct)

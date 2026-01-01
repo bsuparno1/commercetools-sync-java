@@ -196,9 +196,25 @@ public final class ProductTransformUtils {
         final List<Attribute> merged =
                 mergeAttributesForCreate(draft.getAttributes(), projectionProductAttrs);
 
+        final List<Attribute> safeForCreate = new ArrayList<>();
+        final List<Attribute> deferred = new ArrayList<>();
+
+        for (Attribute attr : merged) {
+          if (isProductReferenceAttribute(attr)) {
+            deferred.add(attr);
+          } else {
+            safeForCreate.add(attr);
+          }
+        }
+
+        // store deferred attributes in Custom Object
+        if (!deferred.isEmpty()) {
+          storeDeferredAttributes(draft.getKey(), deferred);
+        }
+
         final ProductDraft patched =
                 ProductDraftBuilder.of(draft)
-                        .attributes(merged)
+                        .attributes(safeForCreate)
                         .build();
 
         result.add(patched);
@@ -441,7 +457,7 @@ public final class ProductTransformUtils {
           .collect(Collectors.toList());
     }
 
-    private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
+    /*private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
       allAttributeReferences.forEach(reference -> {
         if (!(reference instanceof ObjectNode) || !reference.hasNonNull(REFERENCE_ID_FIELD)) {
           return;
@@ -459,7 +475,36 @@ public final class ProductTransformUtils {
         refObj.remove(REFERENCE_ID_FIELD);        // remove "id"
         refObj.put(REFERENCE_KEY_FIELD, key);     // add "key"
       });
+    }*/
+
+    private static final String REFERENCE_KEY_FIELD = "key";
+
+    private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
+      allAttributeReferences.forEach(
+              reference -> {
+                if (!(reference instanceof ObjectNode)) {
+                  return;
+                }
+                final ObjectNode refObj = (ObjectNode) reference;
+
+                final JsonNode idNode = refObj.get(REFERENCE_ID_FIELD);
+                if (idNode == null || idNode.isNull()) {
+                  return;
+                }
+
+                final String sourceId = idNode.asText();
+                final String key = referenceIdToKeyCache.get(sourceId);
+                if (key == null || key.trim().isEmpty()) {
+                  return;
+                }
+
+                // Keep "id" untouched, store key separately.
+                // This avoids breaking the JSON structure for Reference values.
+                refObj.put(REFERENCE_KEY_FIELD, key);
+              });
     }
+
+
 
 
     /**
@@ -551,5 +596,29 @@ public final class ProductTransformUtils {
                     });
               });
     }
+
+    private void storeDeferredAttributes(
+            @Nonnull final String productKey,
+            @Nonnull final List<Attribute> deferredAttributes) {
+
+      getCtpClient()
+              .customObjects()
+              .post(
+                      CustomObjectDraftBuilder.of()
+                              .container("deferred-product-attributes")
+                              .key(productKey)
+                              .value(deferredAttributes)
+                              .build())
+              .execute();
+    }
+
+  }
+
+  private static boolean isProductReferenceAttribute(Attribute attr) {
+    return AttributeUtils
+            .getAttributeReferences(
+                    AttributeUtils.replaceAttributeValueWithJsonAndReturnValue(attr))
+            .stream()
+            .anyMatch(ref -> "product".equals(ref.get("typeId").asText()));
   }
 }
