@@ -2,6 +2,7 @@ package com.commercetools.sync.integration.externalsource.shoppinglists;
 
 import static com.commercetools.api.models.common.LocalizedString.ofEnglish;
 import static com.commercetools.sync.commons.asserts.statistics.AssertionsForStatistics.assertThat;
+import static com.commercetools.sync.integration.commons.utils.CustomerITUtils.ensureStore;
 import static com.commercetools.sync.integration.commons.utils.ShoppingListITUtils.*;
 import static com.commercetools.sync.integration.commons.utils.TestClientUtils.CTP_SOURCE_CLIENT;
 import static com.commercetools.sync.integration.commons.utils.TestClientUtils.CTP_TARGET_CLIENT;
@@ -36,6 +37,7 @@ import com.commercetools.api.models.shopping_list.ShoppingListUpdateAction;
 import com.commercetools.api.models.shopping_list.TextLineItem;
 import com.commercetools.api.models.shopping_list.TextLineItemDraft;
 import com.commercetools.api.models.shopping_list.TextLineItemDraftBuilder;
+import com.commercetools.api.models.store.StoreResourceIdentifier;
 import com.commercetools.api.models.type.CustomFields;
 import com.commercetools.api.models.type.CustomFieldsDraftBuilder;
 import com.commercetools.api.models.type.TypeReference;
@@ -55,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -520,5 +523,64 @@ class ShoppingListSyncIT {
             lineItemDraft ->
                 ShoppingListLineItemDraftBuilder.of(lineItemDraft).addedAt(null).build())
         .collect(toList());
+  }
+
+  @Test
+  void sync_WithStoreChange_ShouldUpdateShoppingListStore() {
+    // Generate unique store key to avoid collisions with other test runs
+    final String storeKey = "test-store-" + UUID.randomUUID();
+
+    // Create the store that will be referenced
+    ensureStore(CTP_TARGET_CLIENT, storeKey);
+
+    // Create a shopping list draft with a different store
+    final ShoppingListDraft modifiedDraft =
+        ShoppingListDraftBuilder.of(shoppingListDraftSampleCarrotCake)
+            .store(storeResourceIdentifierBuilder -> storeResourceIdentifierBuilder.key(storeKey))
+            .build();
+
+    final ShoppingListSyncStatistics shoppingListSyncStatistics =
+        shoppingListSync.sync(singletonList(modifiedDraft)).toCompletableFuture().join();
+
+    assertThat(errorMessages).isEmpty();
+    assertThat(warningMessages).isEmpty();
+    assertThat(exceptions).isEmpty();
+
+    // Verify that a setStore update action was generated
+    assertThat(updateActionList)
+        .anySatisfy(
+            action -> {
+              assertThat(action.getAction()).isEqualTo("setStore");
+            });
+
+    assertThat(shoppingListSyncStatistics).hasValues(1, 0, 1, 0);
+  }
+
+  @Test
+  void sync_WithNullStore_ShouldUpdateShoppingListStoreToNull() {
+    // Create a shopping list draft with null store
+    final StoreResourceIdentifier nullStore = null;
+    final ShoppingListDraft modifiedDraft =
+        ShoppingListDraftBuilder.of(shoppingListDraftSampleCarrotCake).store(nullStore).build();
+
+    final ShoppingListSyncStatistics shoppingListSyncStatistics =
+        shoppingListSync.sync(singletonList(modifiedDraft)).toCompletableFuture().join();
+
+    assertThat(errorMessages).isEmpty();
+    assertThat(warningMessages).isEmpty();
+    assertThat(exceptions).isEmpty();
+
+    // If the original had a store and we set it to null, we should see an update
+    if (shoppingListSampleCarrotCake.getStore() != null) {
+      assertThat(updateActionList)
+          .anySatisfy(
+              action -> {
+                assertThat(action.getAction()).isEqualTo("setStore");
+              });
+      assertThat(shoppingListSyncStatistics).hasValues(1, 0, 1, 0);
+    } else {
+      // If both are null, no update should occur
+      assertThat(shoppingListSyncStatistics).hasValues(1, 0, 0, 0);
+    }
   }
 }
