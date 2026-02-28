@@ -8,24 +8,39 @@ import com.commercetools.api.client.ByProjectKeyCustomObjectsGet;
 import com.commercetools.api.client.ProjectApiRoot;
 import com.commercetools.api.models.category.CategoryReference;
 import com.commercetools.api.models.channel.ChannelReference;
-import com.commercetools.api.models.common.*;
-import com.commercetools.api.models.custom_object.*;
+import com.commercetools.api.models.common.Asset;
+import com.commercetools.api.models.type.CustomFields;
+import com.commercetools.sync.customobjects.helpers.CustomObjectCompositeIdentifier;
+import com.commercetools.api.models.common.Price;
+import com.commercetools.api.models.custom_object.CustomObjectDraftBuilder;
+import com.commercetools.api.models.custom_object.CustomObjectPagedQueryResponse;
 import com.commercetools.api.models.customer_group.CustomerGroupReference;
 import com.commercetools.api.models.graph_ql.GraphQLRequest;
-import com.commercetools.api.models.product.*;
+import com.commercetools.api.models.product.Attribute;
+import com.commercetools.api.models.product.ProductDraft;
+import com.commercetools.api.models.product.ProductDraftBuilder;
+import com.commercetools.api.models.product.ProductProjection;
+import com.commercetools.api.models.product.ProductVariant;
 import com.commercetools.api.models.product_type.ProductTypeReference;
 import com.commercetools.api.models.state.StateReference;
 import com.commercetools.api.models.tax_category.TaxCategoryReference;
-import com.commercetools.api.models.type.*;
+import com.commercetools.api.models.type.TypeReference;
 import com.commercetools.sync.commons.exceptions.ReferenceTransformException;
 import com.commercetools.sync.commons.models.GraphQlQueryResource;
 import com.commercetools.sync.commons.utils.ChunkUtils;
 import com.commercetools.sync.commons.utils.ReferenceIdToKeyCache;
-import com.commercetools.sync.customobjects.helpers.CustomObjectCompositeIdentifier;
 import com.commercetools.sync.services.impl.BaseTransformServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.stream.Collectors;
@@ -34,14 +49,18 @@ import javax.annotation.Nullable;
 
 public final class ProductTransformUtils {
 
+  /**
+   * This constant is only used for cleanup (we don't want to persist "key" alongside "id").
+   * Actual reference resolution relies on REFERENCE_ID_FIELD being temporarily set to the key.
+   */
   private static final String REFERENCE_KEY_FIELD = "key";
 
   /**
    * Transforms products by resolving the references and map them to ProductDrafts.
    *
    * <p>This method replaces the ids on attribute references with keys and resolves(fetch key values
-   * for the reference id's) non null and unexpanded references of the product{@link Product} by
-   * using cache.
+   * for the reference id's) non null and unexpanded references of the product{@link com.commercetools.api.models.product.Product}
+   * by using cache.
    *
    * <p>If the reference ids are already cached, key values are pulled from the cache, otherwise it
    * executes the query to fetch the key value for the reference id's and store the idToKey value
@@ -58,74 +77,73 @@ public final class ProductTransformUtils {
    */
   @Nonnull
   public static CompletableFuture<List<ProductDraft>> toProductDrafts(
-      @Nonnull final ProjectApiRoot client,
-      @Nonnull final ReferenceIdToKeyCache referenceIdToKeyCache,
-      @Nonnull final List<ProductProjection> products) {
+          @Nonnull final ProjectApiRoot client,
+          @Nonnull final ReferenceIdToKeyCache referenceIdToKeyCache,
+          @Nonnull final List<ProductProjection> products) {
 
-    final ProductTransformUtils.ProductTransformServiceImpl productTransformService =
-        new ProductTransformUtils.ProductTransformServiceImpl(client, referenceIdToKeyCache);
+    final ProductTransformServiceImpl productTransformService =
+            new ProductTransformServiceImpl(client, referenceIdToKeyCache);
     return productTransformService.toProductDrafts(products);
   }
 
   private static List<Attribute> mergeAttributesForCreate(
-          @Nullable List<Attribute> variantAttributes,
-          @Nullable List<Attribute> productAttributes) {
+          @Nullable List<Attribute> variantAttributes, @Nullable List<Attribute> productAttributes) {
 
-    Map<String, Attribute> merged = new LinkedHashMap<>();
+    final Map<String, Attribute> merged = new LinkedHashMap<>();
 
     if (variantAttributes != null) {
       for (Attribute attr : variantAttributes) {
-        merged.put(attr.getName(), attr);
+        if (attr != null && attr.getName() != null) {
+          merged.put(attr.getName(), attr);
+        }
       }
     }
 
     if (productAttributes != null) {
       for (Attribute attr : productAttributes) {
-        // product-level attributes override if same name
-        merged.put(attr.getName(), attr);
+        if (attr != null && attr.getName() != null) {
+          // product-level attributes override if same name
+          merged.put(attr.getName(), attr);
+        }
       }
     }
 
     return new ArrayList<>(merged.values());
   }
 
-
-
   private static class ProductTransformServiceImpl extends BaseTransformServiceImpl {
 
     private static final String FAILED_TO_REPLACE_REFERENCES_ON_ATTRIBUTES =
-        "Failed to replace referenced resource ids with keys on the attributes of the products in "
-            + "the current fetched page from the source project. This page will not be synced to the target "
-            + "project.";
+            "Failed to replace referenced resource ids with keys on the attributes of the products in "
+                    + "the current fetched page from the source project. This page will not be synced to the target "
+                    + "project.";
 
     public ProductTransformServiceImpl(
-        @Nonnull final ProjectApiRoot ctpClient,
-        @Nonnull final ReferenceIdToKeyCache referenceIdToKeyCache) {
+            @Nonnull final ProjectApiRoot ctpClient,
+            @Nonnull final ReferenceIdToKeyCache referenceIdToKeyCache) {
       super(ctpClient, referenceIdToKeyCache);
     }
 
     @Nonnull
     public CompletableFuture<List<ProductDraft>> toProductDrafts(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       return replaceAttributeReferenceIdsWithKeys(products)
-          .handle(
-              (productsResolved, throwable) -> {
-                if (throwable != null) {
-                  throw new ReferenceTransformException(
-                      FAILED_TO_REPLACE_REFERENCES_ON_ATTRIBUTES, throwable);
-                }
-                return productsResolved;
-              })
-          .thenCompose(
-              productsWithAttributesResolved ->
-                  transformReferencesAndMapToProductDrafts(productsWithAttributesResolved))
-          .toCompletableFuture();
+              .handle(
+                      (productsResolved, throwable) -> {
+                        if (throwable != null) {
+                          throw new ReferenceTransformException(
+                                  FAILED_TO_REPLACE_REFERENCES_ON_ATTRIBUTES, throwable);
+                        }
+                        return productsResolved;
+                      })
+              .thenCompose(this::transformReferencesAndMapToProductDrafts)
+              .toCompletableFuture();
     }
 
     @Nonnull
     private CompletionStage<List<ProductDraft>> transformReferencesAndMapToProductDrafts(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final List<CompletableFuture<Void>> transformReferencesToRunParallel = new ArrayList<>();
       transformReferencesToRunParallel.add(this.transformProductTypeReference(products));
@@ -135,38 +153,22 @@ public final class ProductTransformUtils {
       transformReferencesToRunParallel.add(this.transformPricesChannelReference(products));
       transformReferencesToRunParallel.add(this.transformCustomTypeReference(products));
       transformReferencesToRunParallel.add(this.transformPricesCustomerGroupReference(products));
-      //transformReferencesToRunParallel.add(this.transformProductReference(products));
+      // transformReferencesToRunParallel.add(this.transformProductReference(products));
 
       return CompletableFuture.allOf(
                       transformReferencesToRunParallel.stream().toArray(CompletableFuture[]::new))
-              .thenApply(
+              .thenCompose(
                       ignore -> {
                         final List<ProductDraft> drafts =
-                                ProductReferenceResolutionUtils.mapToProductDrafts(products, this.referenceIdToKeyCache);
-                        return applyProductLevelAttributes(products, drafts);
+                                ProductReferenceResolutionUtils.mapToProductDrafts(
+                                        products, this.referenceIdToKeyCache);
+                        return applyProductLevelAttributesAsync(products, drafts).toCompletableFuture();
                       });
-
     }
 
-    /*@Nonnull
-    private CompletableFuture<Void> transformProductReference(
-            @Nonnull final List<ProductProjection> products) {
-
-      final Set<String> productIds =
-              products.stream()
-                      .map(this::getAllReferences)
-                      .flatMap(Collection::stream)
-                      .filter(ref -> ProductReference.PRODUCT.equals(ref.get("typeId").asText()))
-                      .map(ref -> ref.get("id").asText())
-                      .collect(Collectors.toSet());
-
-      return fetchAndFillReferenceIdToKeyCache(productIds, GraphQlQueryResource.PRODUCTS);
-    }*/
-
     @Nonnull
-    private List<ProductDraft> applyProductLevelAttributes(
-            @Nonnull final List<ProductProjection> projections,
-            @Nonnull final List<ProductDraft> drafts) {
+    private CompletionStage<List<ProductDraft>> applyProductLevelAttributesAsync(
+            @Nonnull final List<ProductProjection> projections, @Nonnull final List<ProductDraft> drafts) {
 
       final Map<String, ProductProjection> projectionByKey =
               projections.stream()
@@ -175,6 +177,7 @@ public final class ProductTransformUtils {
                       .collect(Collectors.toMap(ProductProjection::getKey, p -> p, (a, b) -> a));
 
       final List<ProductDraft> result = new ArrayList<>(drafts.size());
+      final List<CompletableFuture<Void>> deferredWrites = new ArrayList<>();
 
       for (ProductDraft draft : drafts) {
         if (draft == null || draft.getKey() == null) {
@@ -186,13 +189,11 @@ public final class ProductTransformUtils {
         final List<Attribute> projectionProductAttrs =
                 projection != null ? projection.getAttributes() : null;
 
-        // If source projection has no product-level attributes, keep draft as-is.
         if (projectionProductAttrs == null || projectionProductAttrs.isEmpty()) {
           result.add(draft);
           continue;
         }
 
-        // ✅ Merge (do NOT overwrite). Draft attrs might already contain some attributes.
         final List<Attribute> merged =
                 mergeAttributesForCreate(draft.getAttributes(), projectionProductAttrs);
 
@@ -207,111 +208,113 @@ public final class ProductTransformUtils {
           }
         }
 
-        // store deferred attributes in Custom Object
         if (!deferred.isEmpty()) {
-          storeDeferredAttributes(draft.getKey(), deferred);
+          deferredWrites.add(storeDeferredAttributes(draft.getKey(), deferred).toCompletableFuture());
         }
 
         final ProductDraft patched =
-                ProductDraftBuilder.of(draft)
-                        .attributes(safeForCreate)
-                        .build();
+                ProductDraftBuilder.of(draft).attributes(safeForCreate).build();
 
         result.add(patched);
       }
 
-      return result;
+      if (deferredWrites.isEmpty()) {
+        return CompletableFuture.completedFuture(result);
+      }
+
+      return CompletableFuture.allOf(deferredWrites.toArray(CompletableFuture[]::new))
+              .thenApply(ignored -> result);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformProductTypeReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> productTypeIds =
-          products.stream()
-              .map(ProductProjection::getProductType)
-              .map(ProductTypeReference::getId)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getProductType)
+                      .map(ProductTypeReference::getId)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(productTypeIds, GraphQlQueryResource.PRODUCT_TYPES);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformTaxCategoryReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> taxCategoryIds =
-          products.stream()
-              .map(ProductProjection::getTaxCategory)
-              .filter(Objects::nonNull)
-              .map(TaxCategoryReference::getId)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getTaxCategory)
+                      .filter(Objects::nonNull)
+                      .map(TaxCategoryReference::getId)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(taxCategoryIds, GraphQlQueryResource.TAX_CATEGORIES);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformStateReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> stateIds =
-          products.stream()
-              .map(ProductProjection::getState)
-              .filter(Objects::nonNull)
-              .map(StateReference::getId)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getState)
+                      .filter(Objects::nonNull)
+                      .map(StateReference::getId)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(stateIds, GraphQlQueryResource.STATES);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformCategoryReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> categoryIds =
-          products.stream()
-              .map(ProductProjection::getCategories)
-              .filter(Objects::nonNull)
-              .map(
-                  categories ->
-                      categories.stream()
-                          .map(CategoryReference::getId)
-                          .collect(Collectors.toList()))
-              .flatMap(Collection::stream)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getCategories)
+                      .filter(Objects::nonNull)
+                      .map(
+                              categories ->
+                                      categories.stream()
+                                              .map(CategoryReference::getId)
+                                              .collect(Collectors.toList()))
+                      .flatMap(Collection::stream)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(categoryIds, GraphQlQueryResource.CATEGORIES);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformPricesChannelReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> channelIds =
-          products.stream()
-              .map(product -> product.getAllVariants())
-              .map(
-                  productVariants ->
-                      productVariants.stream()
-                          .filter(Objects::nonNull)
-                          .map(
-                              productVariant ->
-                                  productVariant.getPrices().stream()
-                                      .map(Price::getChannel)
-                                      .filter(Objects::nonNull)
-                                      .map(ChannelReference::getId)
-                                      .collect(toList()))
-                          .flatMap(Collection::stream)
-                          .collect(toList()))
-              .flatMap(Collection::stream)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getAllVariants)
+                      .map(
+                              productVariants ->
+                                      productVariants.stream()
+                                              .filter(Objects::nonNull)
+                                              .map(
+                                                      productVariant ->
+                                                              productVariant.getPrices().stream()
+                                                                      .map(Price::getChannel)
+                                                                      .filter(Objects::nonNull)
+                                                                      .map(ChannelReference::getId)
+                                                                      .collect(toList()))
+                                              .flatMap(Collection::stream)
+                                              .collect(toList()))
+                      .flatMap(Collection::stream)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(channelIds, GraphQlQueryResource.CHANNELS);
     }
 
     @Nonnull
     private CompletableFuture<Void> transformCustomTypeReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> setOfTypeIds = new HashSet<>();
       setOfTypeIds.addAll(collectPriceCustomTypeIds(products));
@@ -322,71 +325,71 @@ public final class ProductTransformUtils {
 
     private Set<String> collectPriceCustomTypeIds(@Nonnull List<ProductProjection> products) {
       return products.stream()
-          .map(product -> product.getAllVariants())
-          .map(
-              productVariants ->
-                  productVariants.stream()
-                      .filter(Objects::nonNull)
-                      .map(
-                          productVariant ->
-                              productVariant.getPrices().stream()
-                                  .map(Price::getCustom)
-                                  .filter(Objects::nonNull)
-                                  .map(CustomFields::getType)
-                                  .map(TypeReference::getId)
-                                  .collect(toList()))
-                      .flatMap(Collection::stream)
-                      .collect(toList()))
-          .flatMap(Collection::stream)
-          .collect(toSet());
+              .map(ProductProjection::getAllVariants)
+              .map(
+                      productVariants ->
+                              productVariants.stream()
+                                      .filter(Objects::nonNull)
+                                      .map(
+                                              productVariant ->
+                                                      productVariant.getPrices().stream()
+                                                              .map(Price::getCustom)
+                                                              .filter(Objects::nonNull)
+                                                              .map(CustomFields::getType)
+                                                              .map(TypeReference::getId)
+                                                              .collect(toList()))
+                                      .flatMap(Collection::stream)
+                                      .collect(toList()))
+              .flatMap(Collection::stream)
+              .collect(toSet());
     }
 
     private Set<String> collectAssetCustomTypeIds(@Nonnull List<ProductProjection> products) {
       return products.stream()
-          .map(product -> product.getAllVariants())
-          .map(
-              productVariants ->
-                  productVariants.stream()
-                      .filter(Objects::nonNull)
-                      .map(
-                          productVariant ->
-                              productVariant.getAssets().stream()
-                                  .map(Asset::getCustom)
-                                  .filter(Objects::nonNull)
-                                  .map(CustomFields::getType)
-                                  .map(TypeReference::getId)
-                                  .collect(toList()))
-                      .flatMap(Collection::stream)
-                      .collect(toList()))
-          .flatMap(Collection::stream)
-          .collect(toSet());
+              .map(ProductProjection::getAllVariants)
+              .map(
+                      productVariants ->
+                              productVariants.stream()
+                                      .filter(Objects::nonNull)
+                                      .map(
+                                              productVariant ->
+                                                      productVariant.getAssets().stream()
+                                                              .map(Asset::getCustom)
+                                                              .filter(Objects::nonNull)
+                                                              .map(CustomFields::getType)
+                                                              .map(TypeReference::getId)
+                                                              .collect(toList()))
+                                      .flatMap(Collection::stream)
+                                      .collect(toList()))
+              .flatMap(Collection::stream)
+              .collect(toSet());
     }
 
     @Nonnull
     private CompletableFuture<Void> transformPricesCustomerGroupReference(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final Set<String> customerGroupIds =
-          products.stream()
-              .map(product -> product.getAllVariants())
-              .map(
-                  productVariants ->
-                      productVariants.stream()
-                          .filter(Objects::nonNull)
-                          .map(
-                              productVariant ->
-                                  productVariant.getPrices().stream()
-                                      .map(Price::getCustomerGroup)
-                                      .filter(Objects::nonNull)
-                                      .map(CustomerGroupReference::getId)
-                                      .collect(toList()))
-                          .flatMap(Collection::stream)
-                          .collect(toList()))
-              .flatMap(Collection::stream)
-              .collect(toSet());
+              products.stream()
+                      .map(ProductProjection::getAllVariants)
+                      .map(
+                              productVariants ->
+                                      productVariants.stream()
+                                              .filter(Objects::nonNull)
+                                              .map(
+                                                      productVariant ->
+                                                              productVariant.getPrices().stream()
+                                                                      .map(Price::getCustomerGroup)
+                                                                      .filter(Objects::nonNull)
+                                                                      .map(CustomerGroupReference::getId)
+                                                                      .collect(toList()))
+                                              .flatMap(Collection::stream)
+                                              .collect(toList()))
+                      .flatMap(Collection::stream)
+                      .collect(toSet());
 
       return fetchAndFillReferenceIdToKeyCache(
-          customerGroupIds, GraphQlQueryResource.CUSTOMER_GROUPS);
+              customerGroupIds, GraphQlQueryResource.CUSTOMER_GROUPS);
     }
 
     /**
@@ -400,33 +403,28 @@ public final class ProductTransformUtils {
      */
     @Nonnull
     public CompletionStage<List<ProductProjection>> replaceAttributeReferenceIdsWithKeys(
-        @Nonnull final List<ProductProjection> products) {
+            @Nonnull final List<ProductProjection> products) {
 
       final List<JsonNode> allAttributeReferences = getAllReferences(products);
       return getIdToKeys(allAttributeReferences)
-          .thenApply(
-              ignored -> {
-                replaceReferences(getAllReferences(products));
-                return products;
-              });
+              .thenApply(
+                      ignored -> {
+                        replaceReferences(getAllReferences(products));
+                        return products;
+                      });
     }
 
     @Nonnull
     private List<JsonNode> getAllReferences(@Nonnull final List<ProductProjection> products) {
-      return products.stream()
-          .map(this::getAllReferences)
-          .flatMap(Collection::stream)
-          .collect(Collectors.toList());
+      return products.stream().map(this::getAllReferences).flatMap(Collection::stream).collect(toList());
     }
 
     private List<JsonNode> getAllReferences(@Nonnull final ProductProjection product) {
       final List<JsonNode> refs = new ArrayList<>();
 
-      // Variant attributes (existing behavior)
       final List<ProductVariant> allVariants = product.getAllVariants();
       refs.addAll(getAttributeReferences(allVariants));
 
-      // Product-level attributes (NEW)
       final List<Attribute> productLevelAttrs = product.getAttributes();
       if (productLevelAttrs != null && !productLevelAttrs.isEmpty()) {
         refs.addAll(getProductLevelAttributeReferences(productLevelAttrs));
@@ -441,43 +439,19 @@ public final class ProductTransformUtils {
               .map(AttributeUtils::replaceAttributeValueWithJsonAndReturnValue)
               .map(AttributeUtils::getAttributeReferences)
               .flatMap(Collection::stream)
-              .collect(Collectors.toList());
+              .collect(toList());
     }
-
 
     @Nonnull
     private List<JsonNode> getAttributeReferences(@Nonnull final List<ProductVariant> variants) {
-
       return variants.stream()
-          .map(ProductVariant::getAttributes)
-          .flatMap(Collection::stream)
-          .map(AttributeUtils::replaceAttributeValueWithJsonAndReturnValue)
-          .map(AttributeUtils::getAttributeReferences)
-          .flatMap(Collection::stream)
-          .collect(Collectors.toList());
+              .map(ProductVariant::getAttributes)
+              .flatMap(Collection::stream)
+              .map(AttributeUtils::replaceAttributeValueWithJsonAndReturnValue)
+              .map(AttributeUtils::getAttributeReferences)
+              .flatMap(Collection::stream)
+              .collect(toList());
     }
-
-    /*private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
-      allAttributeReferences.forEach(reference -> {
-        if (!(reference instanceof ObjectNode) || !reference.hasNonNull(REFERENCE_ID_FIELD)) {
-          return;
-        }
-
-        final ObjectNode refObj = (ObjectNode) reference;
-        final String id = refObj.get(REFERENCE_ID_FIELD).asText();
-
-        final String key = referenceIdToKeyCache.get(id);
-        if (key == null || key.isBlank()) {
-          return; // leave as-is (still id-based)
-        }
-
-        // IMPORTANT: use key-based identifier, not id-with-key
-        refObj.remove(REFERENCE_ID_FIELD);        // remove "id"
-        refObj.put(REFERENCE_KEY_FIELD, key);     // add "key"
-      });
-    }*/
-
-    private static final String REFERENCE_KEY_FIELD = "key";
 
     private void replaceReferences(@Nonnull final List<JsonNode> allAttributeReferences) {
       allAttributeReferences.forEach(
@@ -498,63 +472,44 @@ public final class ProductTransformUtils {
                   return;
                 }
 
-                // Keep "id" untouched, store key separately.
-                // This avoids breaking the JSON structure for Reference values.
-                refObj.put(REFERENCE_KEY_FIELD, key);
+                // CRITICAL: resolver expects "id" to temporarily contain the key.
+                refObj.put(REFERENCE_ID_FIELD, key);
+                refObj.remove(REFERENCE_KEY_FIELD);
               });
     }
 
-
-
-
-    /**
-     * Given a {@link Set}s of references of product attributes, this method first checks if there
-     * is a key mapping for each id in the {@code idToKey} cache. If there exists a mapping for all
-     * the ids, the method returns a future containing the existing {@code idToKey} cache as it is.
-     * If there is at least one missing mapping, it attempts to make a GraphQL request (note: rest
-     * request for custom objects) to CTP to fetch all ids and keys of every missing product,
-     * category, productType or custom object Id in a combined request. For each fetched key/id
-     * pair, the method will insert it into the {@code idToKey} cache and then return the cache in a
-     * {@link CompletableFuture} after the request is successful.
-     *
-     * @param allAttributeReferences all references of product attributes to find a id -> key
-     *     mapping for.
-     * @return a ReferenceIdToKeyCache instance that manages cache of id to key representing
-     *     products, categories, productTypes and customObjects in the CTP project defined by the
-     *     injected {@code ctpClient}.
-     */
     @Nonnull
     CompletableFuture<Void> getIdToKeys(@Nonnull final List<JsonNode> allAttributeReferences) {
 
       final Set<JsonNode> nonCachedReferences = getNonCachedReferences(allAttributeReferences);
       final Map<GraphQlQueryResource, Set<String>> map =
-          buildMapOfRequestTypeToReferencedIds(nonCachedReferences);
+              buildMapOfRequestTypeToReferencedIds(nonCachedReferences);
 
       final Set<String> nonCachedCustomObjectIds = map.remove(GraphQlQueryResource.CUSTOM_OBJECTS);
 
       if (map.values().isEmpty()
-          || map.values().stream().allMatch(referencedIdsSet -> referencedIdsSet.isEmpty())) {
+              || map.values().stream().allMatch(referencedIdsSet -> referencedIdsSet.isEmpty())) {
         return fetchCustomObjectKeys(nonCachedCustomObjectIds);
       }
 
       final List<GraphQLRequest> collectedRequests =
-          map.keySet().stream()
-              .map(
-                  resource -> {
-                    List<List<String>> chunk = ChunkUtils.chunk(map.get(resource), CHUNK_SIZE);
-                    return createGraphQLRequests(chunk, resource);
-                  })
-              .flatMap(Collection::stream)
-              .collect(toList());
+              map.keySet().stream()
+                      .map(
+                              resource -> {
+                                List<List<String>> chunk = ChunkUtils.chunk(map.get(resource), CHUNK_SIZE);
+                                return createGraphQLRequests(chunk, resource);
+                              })
+                      .flatMap(Collection::stream)
+                      .collect(toList());
 
       return ChunkUtils.executeChunks(getCtpClient(), collectedRequests)
-          .thenAccept(this::cacheResourceReferenceKeys)
-          .thenCompose(ignored -> fetchCustomObjectKeys(nonCachedCustomObjectIds));
+              .thenAccept(this::cacheResourceReferenceKeys)
+              .thenCompose(ignored -> fetchCustomObjectKeys(nonCachedCustomObjectIds));
     }
 
     @Nonnull
     private CompletableFuture<Void> fetchCustomObjectKeys(
-        @Nullable final Set<String> nonCachedCustomObjectIds) {
+            @Nullable final Set<String> nonCachedCustomObjectIds) {
 
       if (nonCachedCustomObjectIds == null || nonCachedCustomObjectIds.isEmpty()) {
         return CompletableFuture.completedFuture(null);
@@ -562,46 +517,40 @@ public final class ProductTransformUtils {
 
       final List<List<String>> chunkedIds = ChunkUtils.chunk(nonCachedCustomObjectIds, CHUNK_SIZE);
 
-      // As the referenced custom object might not included in the products because reference
-      // expansion wasn't provided
-      // we have no clue about it's container. That's why we use this deprecated Request object for
-      // now.
       final List<ByProjectKeyCustomObjectsGet> chunkedRequests =
-          chunkedIds.stream()
-              .map(
-                  ids ->
-                      getCtpClient()
-                          .customObjects()
-                          .get()
-                          .withWhere("id in :ids")
-                          .withPredicateVar("ids", ids)
-                          .withLimit(CHUNK_SIZE)
-                          .withWithTotal(false))
-              .collect(toList());
+              chunkedIds.stream()
+                      .map(
+                              ids ->
+                                      getCtpClient()
+                                              .customObjects()
+                                              .get()
+                                              .withWhere("id in :ids")
+                                              .withPredicateVar("ids", ids)
+                                              .withLimit(CHUNK_SIZE)
+                                              .withWithTotal(false))
+                      .collect(toList());
 
       return ChunkUtils.executeChunks(chunkedRequests)
-          .thenAccept(
-              chunk -> {
-                chunk.forEach(
-                    response -> {
-                      CustomObjectPagedQueryResponse responseBody = response.getBody();
-                      responseBody
-                          .getResults()
-                          .forEach(
-                              customObject -> {
-                                this.referenceIdToKeyCache.add(
-                                    customObject.getId(),
-                                    CustomObjectCompositeIdentifier.of(customObject).toString());
-                              });
-                    });
-              });
+              .thenAccept(
+                      chunk -> {
+                        chunk.forEach(
+                                response -> {
+                                  final CustomObjectPagedQueryResponse responseBody = response.getBody();
+                                  responseBody
+                                          .getResults()
+                                          .forEach(
+                                                  customObject ->
+                                                          referenceIdToKeyCache.add(
+                                                                  customObject.getId(),
+                                                                  CustomObjectCompositeIdentifier.of(customObject).toString()));
+                                });
+                      });
     }
 
-    private void storeDeferredAttributes(
-            @Nonnull final String productKey,
-            @Nonnull final List<Attribute> deferredAttributes) {
+    private CompletionStage<Void> storeDeferredAttributes(
+            @Nonnull final String productKey, @Nonnull final List<Attribute> deferredAttributes) {
 
-      getCtpClient()
+      return getCtpClient()
               .customObjects()
               .post(
                       CustomObjectDraftBuilder.of()
@@ -609,14 +558,13 @@ public final class ProductTransformUtils {
                               .key(productKey)
                               .value(deferredAttributes)
                               .build())
-              .execute();
+              .execute()
+              .thenApply(ignore -> null);
     }
-
   }
 
   private static boolean isProductReferenceAttribute(Attribute attr) {
-    return AttributeUtils
-            .getAttributeReferences(
+    return AttributeUtils.getAttributeReferences(
                     AttributeUtils.replaceAttributeValueWithJsonAndReturnValue(attr))
             .stream()
             .anyMatch(ref -> "product".equals(ref.get("typeId").asText()));
