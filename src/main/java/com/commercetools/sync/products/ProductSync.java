@@ -401,6 +401,17 @@ public class ProductSync
                                                     if (!beforeUpdateCallBackApplied.isEmpty()) {
                                                         return updateProduct(oldProduct, newProduct, beforeUpdateCallBackApplied);
                                                     }
+
+                                                    // No-op: existing product matched but no update actions generated.
+                                                    // This is the main source of "processed != created".
+                                                    if (oldProduct.getKey() != null) {
+                                                        // Keep it INFO for now; change to DEBUG if it’s too noisy.
+                                                        syncOptions.applyWarningCallback(
+                                                                new com.commercetools.sync.commons.exceptions.SyncException(
+                                                                        "No-op product (no update actions) for key: " + oldProduct.getKey()),
+                                                                oldProduct,
+                                                                newProduct);
+                                                    }
                                                     return CompletableFuture.completedFuture((Void) null);
                                                 })
                                         .orElseGet(
@@ -499,7 +510,18 @@ public class ProductSync
                                                         statistics.incrementFailed();
                                                     }
                                                 }))
-                .orElse(CompletableFuture.completedFuture(null));
+                //.orElse(CompletableFuture.completedFuture(null));
+                .orElseGet(() -> {
+                    if (productDraft.getKey() != null) {
+                        syncOptions.applyWarningCallback(
+                                new com.commercetools.sync.commons.exceptions.SyncException(
+                                        "Skipped create: beforeCreateCallback returned empty for key: " + productDraft.getKey()),
+                                null,
+                                productDraft);
+                    }
+                    return CompletableFuture.completedFuture(null);
+                });
+
     }
 
     private void handleProductSyncError(
